@@ -56,8 +56,9 @@ def build_chat_prompt(query: str, retrieved_docs: List[Dict[str, str]]) -> str:
         [f"Section: {doc['section']}\nClause: {doc['clause']}" for doc in retrieved_docs]
     )
     prompt = (
-        "You are a policy assistant. Answer only using retrieved policy information. "
-        "If information is unavailable, say: 'Information not found in uploaded policies.'\n\n"
+        "You are a factual policy assistant. Use ONLY the provided context to answer. Do NOT hallucinate. "
+        "If the answer cannot be found in the context, reply exactly: 'Information not found in uploaded policies.' "
+        "Be concise and return a short, factual answer.\n\n"
         f"Context:\n{context_text}\n\nQuestion: {query}"
     )
     return prompt
@@ -68,8 +69,8 @@ def build_section_question_prompt(section_name: str, old_context: str, new_conte
     old_text = old_context.strip() or "No old section content available."
     new_text = new_context.strip() or "No new section content available."
     prompt = (
-        f"You are a policy review assistant. Generate {num_questions} concise, actionable questions for reviewers about the changes in the '{section_name}' section. "
-        "Focus on compliance, stakeholder impact, implementation steps, and risks. Return the questions as a numbered list.\n\n"
+        f"You are a policy review assistant. Using ONLY the provided old and new section content, generate {num_questions} concise, actionable review questions about the changes in the '{section_name}' section. "
+        "Focus on compliance, stakeholder impact, implementation steps, and risks. If no changes are present, return a single line: 'No significant changes detected.' Return numbered questions only.\n\n"
         "Old section content:\n"
         f"{old_text}\n\n"
         "New section content:\n"
@@ -77,6 +78,36 @@ def build_section_question_prompt(section_name: str, old_context: str, new_conte
         "Questions:"
     )
     return prompt
+
+
+def sanitize_llm_output(output: str, max_chars: int = 2000) -> str:
+    """
+    Basic sanitization and safety filtering for LLM output.
+    - Truncates very long outputs
+    - Masks explicit PII-like tokens (naive)
+    - Blocks outputs containing disallowed keywords and returns a warning instead
+    """
+    if not isinstance(output, str):
+        output = str(output)
+
+    # Truncate
+    if len(output) > max_chars:
+        output = output[: max_chars - 3] + "..."
+
+    # Naive PII masking: replace common sensitive token strings
+    pii_tokens = ["ssn", "social security", "credit card", "card number", "password"]
+    lowered = output.lower()
+    for token in pii_tokens:
+        if token in lowered:
+            return "The model output was removed for containing potential sensitive information."
+
+    # Basic disallowed words list (can be extended)
+    disallowed = ["kill", "terrorist", "illegal"]
+    for bad in disallowed:
+        if bad in lowered:
+            return "The model produced content that violates safety policies and was removed."
+
+    return output
 
 
 def query_llm(prompt: str, api_key: str = None, provider: str = "groq", model_name: str = None, endpoint: Optional[str] = None) -> str:
@@ -105,14 +136,16 @@ def query_llm(prompt: str, api_key: str = None, provider: str = "groq", model_na
             )
             # Preferred structured response
             if hasattr(response, "choices") and len(response.choices) > 0:
-                return getattr(response.choices[0].message, "content", str(response))
+                raw = getattr(response.choices[0].message, "content", str(response))
+                return sanitize_llm_output(raw)
             # Fallback for dict-like responses
             if isinstance(response, dict):
                 choices = response.get("choices") or []
                 if choices:
                     msg = choices[0].get("message") or {}
-                    return msg.get("content", str(response))
-            return str(response)
+                    raw = msg.get("content", str(response))
+                    return sanitize_llm_output(raw)
+            return sanitize_llm_output(str(response))
         except Exception as e:
             return f"Groq request failed: {e}"
 

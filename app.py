@@ -6,6 +6,7 @@ try:
 except ImportError:
     dotenv = None
 import pandas as pd
+import math
 import plotly.express as px
 import streamlit as st
 
@@ -293,9 +294,76 @@ def render_comparison_page():
     if st.session_state["comparison"].empty:
         st.warning("Load and process documents first on the Upload Documents page.")
         return
-    st.dataframe(st.session_state["comparison"], use_container_width=True)
+
+    df = st.session_state["comparison"].copy()
+
+    # Filters
+    with st.expander("Filters", expanded=True):
+        # Sections (use new_section by default)
+        all_sections = sorted(df["new_section"].fillna("General").unique().tolist())
+        if not all_sections:
+            all_sections = ["General"]
+        selected_sections = st.multiselect("Section (new)", options=all_sections, default=all_sections)
+
+        # Change types
+        change_types = ["Added", "Deleted", "Modified", "Unchanged"]
+        selected_change_types = st.multiselect("Change type", options=change_types, default=change_types)
+
+        # Impact levels
+        impact_levels = sorted(df["impact_level"].fillna("None").unique().tolist())
+        selected_impacts = st.multiselect("Impact level", options=impact_levels, default=impact_levels)
+
+        # Free text search across old/new clauses
+        text_search = st.text_input("Text search (clauses)")
+
+        # Pagination size
+        page_size = st.selectbox("Rows per page", options=[10, 25, 50, 100], index=0)
+
+    # Apply filters
+    filtered = df[df["new_section"].fillna("General").isin(selected_sections)]
+    if selected_change_types:
+        filtered = filtered[filtered["change_type"].isin(selected_change_types)]
+    if selected_impacts:
+        filtered = filtered[filtered["impact_level"].isin(selected_impacts)]
+
+    if text_search and text_search.strip():
+        q = text_search.strip().lower()
+        filtered = filtered[
+            filtered.apply(lambda r: q in (str(r.get("old_clause", "")) + " " + str(r.get("new_clause", ""))).lower(), axis=1)
+        ]
+
+    total = len(filtered)
+    total_pages = max(1, math.ceil(total / page_size))
+    page = st.session_state.get("comparison_page", 1)
+
+    # Pagination controls
+    pcol1, pcol2, pcol3 = st.columns([1, 1, 6])
+    with pcol1:
+        if st.button("Previous", key="prev_page"):
+            page = max(1, page - 1)
+    with pcol2:
+        if st.button("Next", key="next_page"):
+            page = min(total_pages, page + 1)
+    with pcol3:
+        st.write(f"Page {page} / {total_pages} — {total} matching rows")
+
+    st.session_state["comparison_page"] = page
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    display_df = filtered.iloc[start:end]
+
+    st.dataframe(display_df.reset_index(drop=True), use_container_width=True)
+
+    # Download filtered CSV
+    try:
+        csv = filtered.to_csv(index=False).encode("utf-8")
+        st.download_button("Download filtered CSV", csv, file_name="comparison_filtered.csv", mime="text/csv")
+    except Exception:
+        pass
+
     st.markdown("### Change Insights")
-    st.write("Use the comparison table to identify additions, deletions, and modifications between old and new policy versions.")
+    st.write(f"Showing {len(display_df)} rows on this page — {total} total matching rows (from {len(df)} clauses).")
 
 
 def render_search_page():
