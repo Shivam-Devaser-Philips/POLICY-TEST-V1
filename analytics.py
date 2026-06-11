@@ -72,11 +72,25 @@ def generate_executive_summary(comparison_df: pd.DataFrame) -> Dict[str, int]:
     }
 
 
-def summarize_by_section(comparison_df: pd.DataFrame) -> pd.DataFrame:
+def summarize_by_section(comparison_df: pd.DataFrame, section_key: str = "new_section") -> pd.DataFrame:
+    """
+    Summarize changes grouped by a section column.
+
+    Args:
+        comparison_df: DataFrame with comparison rows containing `change_type` and section columns.
+        section_key: Column to group by (e.g., 'new_section' or 'old_section').
+
+    Returns:
+        DataFrame with columns ['section', 'added', 'deleted', 'modified', 'unchanged']
+    """
     if comparison_df.empty:
         return pd.DataFrame(columns=["section", "added", "deleted", "modified", "unchanged"])
+
+    if section_key not in comparison_df.columns:
+        raise KeyError(f"Section key '{section_key}' not found in comparison_df columns.")
+
     section_groups = []
-    for section, group in comparison_df.groupby("new_section"):
+    for section, group in comparison_df.groupby(section_key):
         counts = group["change_type"].value_counts().to_dict()
         section_groups.append(
             {
@@ -87,6 +101,7 @@ def summarize_by_section(comparison_df: pd.DataFrame) -> pd.DataFrame:
                 "unchanged": int(counts.get("Unchanged", 0)),
             }
         )
+
     return pd.DataFrame(section_groups).sort_values(by=["added", "modified", "deleted"], ascending=False)
 
 

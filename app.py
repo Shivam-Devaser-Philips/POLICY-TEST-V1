@@ -18,7 +18,13 @@ from analytics import (
 from comparison import compare_policy_clauses
 from embeddings import create_embeddings, load_embedding_model
 from parser import load_document, split_into_clauses
-from rag import build_chat_prompt, build_vector_store, query_llm, search_vector_store
+from rag import (
+    build_chat_prompt,
+    build_section_question_prompt,
+    build_vector_store,
+    query_llm,
+    search_vector_store,
+)
 from reports import create_excel_report, create_pdf_report
 
 
@@ -47,9 +53,15 @@ def initialize_session_state():
         "comparison": pd.DataFrame(),
         "impact_df": pd.DataFrame(),
         "section_summary": pd.DataFrame(),
+        "old_section_summary": pd.DataFrame(),
+        "new_section_summary": pd.DataFrame(),
+        "old_section_contexts": {},
+        "new_section_contexts": {},
         "executive_summary": {},
         "vector_store": None,
         "chat_history": [],
+        "selected_section": None,
+        "section_questions": {},
     }
     for key, value in state_defaults.items():
         if key not in st.session_state:
@@ -86,6 +98,17 @@ def load_sample_documents():
     return old_sample, new_sample
 
 
+def build_section_contexts(clauses_df: pd.DataFrame, section_col: str = "section") -> Dict[str, str]:
+    contexts: Dict[str, str] = {}
+    if clauses_df is None or clauses_df.empty:
+        return contexts
+    grouped = clauses_df.groupby(clauses_df[section_col].fillna("General"))
+    for section, grp in grouped:
+        text = "\n\n".join([str(x) for x in grp["clause"].fillna("").tolist() if x])
+        contexts[section or "General"] = text
+    return contexts
+
+
 def process_documents(old_doc, new_doc):
     old_clauses = split_into_clauses(old_doc)
     new_clauses = split_into_clauses(new_doc)
@@ -97,9 +120,24 @@ def process_documents(old_doc, new_doc):
     comparison = compare_policy_clauses(old_clauses, new_clauses)
     comparison = add_impact_labels(comparison)
     exec_summary = generate_executive_summary(comparison)
-    section_summary = summarize_by_section(comparison)
+    # compute section summaries for both old and new
+    new_section_summary = summarize_by_section(comparison, section_key="new_section")
+    old_section_summary = summarize_by_section(comparison, section_key="old_section")
+    # build contexts for prompting
+    old_section_contexts = build_section_contexts(old_clauses, section_col="section")
+    new_section_contexts = build_section_contexts(new_clauses, section_col="section")
     impact_df = comparison[["old_section", "old_clause", "new_section", "new_clause", "change_type", "impact_level", "impact_reason"]].copy()
-    return old_clauses, new_clauses, comparison, exec_summary, section_summary, impact_df
+    return (
+        old_clauses,
+        new_clauses,
+        comparison,
+        exec_summary,
+        new_section_summary,
+        old_section_summary,
+        old_section_contexts,
+        new_section_contexts,
+        impact_df,
+    )
 
 
 def render_upload_page():
@@ -133,7 +171,10 @@ def render_upload_page():
             st.session_state["new_clauses"],
             st.session_state["comparison"],
             st.session_state["executive_summary"],
-            st.session_state["section_summary"],
+            st.session_state["new_section_summary"],
+            st.session_state["old_section_summary"],
+            st.session_state["old_section_contexts"],
+            st.session_state["new_section_contexts"],
             st.session_state["impact_df"],
         ) = process_documents(st.session_state["old_text"], st.session_state["new_text"])
 
@@ -181,14 +222,70 @@ def render_dashboard_page():
     fig2 = px.bar(impact_data, x="impact", y="count", title="Impact Distribution", text="count")
     st.plotly_chart(fig2, use_container_width=True)
 
-    if not st.session_state["section_summary"].empty:
+    # Use new_section_summary for charts
+    if not st.session_state.get("new_section_summary", pd.DataFrame()).empty:
         fig3 = px.bar(
-            st.session_state["section_summary"],
+            st.session_state["new_section_summary"],
             x="section",
             y=["added", "deleted", "modified", "unchanged"],
-            title="Changes by Section",
+            title="Changes by Section (New)",
         )
         st.plotly_chart(fig3, use_container_width=True)
+
+    # Show both old and new section summaries side-by-side
+    st.subheader("Section Summaries")
+    col_old, col_new = st.columns(2)
+    with col_old:
+        st.markdown("**Old Policy: Changes by Section**")
+        if st.session_state.get("old_section_summary") is None or st.session_state["old_section_summary"].empty:
+            st.write("No old section summary available.")
+        else:
+            st.dataframe(st.session_state["old_section_summary"], use_container_width=True)
+    with col_new:
+        st.markdown("**New Policy: Changes by Section**")
+        if st.session_state.get("new_section_summary") is None or st.session_state["new_section_summary"].empty:
+            st.write("No new section summary available.")
+        else:
+            st.dataframe(st.session_state["new_section_summary"], use_container_width=True)
+
+    # Section selector and LLM-driven sample questions
+    sections = set()
+    if st.session_state.get("old_section_summary") is not None and not st.session_state["old_section_summary"].empty:
+        sections.update(st.session_state["old_section_summary"]["section"].tolist())
+    if st.session_state.get("new_section_summary") is not None and not st.session_state["new_section_summary"].empty:
+        sections.update(st.session_state["new_section_summary"]["section"].tolist())
+
+    sections = sorted(list(sections))
+    if sections:
+        selected = st.selectbox("Select section for review", sections, index=0, key="selected_section")
+        old_ctx = st.session_state.get("old_section_contexts", {}).get(selected, "")
+        new_ctx = st.session_state.get("new_section_contexts", {}).get(selected, "")
+
+        st.markdown("### Section context preview")
+        if old_ctx:
+            st.markdown("**Old clauses (excerpt):**")
+            st.write(old_ctx[:1000] + ("..." if len(old_ctx) > 1000 else ""))
+        if new_ctx:
+            st.markdown("**New clauses (excerpt):**")
+            st.write(new_ctx[:1000] + ("..." if len(new_ctx) > 1000 else ""))
+
+        if st.button("Generate section review questions"):
+            prompt = build_section_question_prompt(selected, old_ctx, new_ctx, num_questions=5)
+            answer = query_llm(prompt, api_key=GROQ_API_KEY, provider=LLM_PROVIDER, model_name=GROQ_MODEL_NAME)
+            lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+            # normalize numbered lines
+            questions = [ln.split(".", 1)[-1].strip() if ln[0].isdigit() else ln for ln in lines]
+            if "section_questions" not in st.session_state:
+                st.session_state["section_questions"] = {}
+            st.session_state["section_questions"][selected] = questions
+
+        qs = st.session_state.get("section_questions", {}).get(selected, [])
+        if qs:
+            st.markdown("#### Generated questions")
+            for i, q in enumerate(qs, start=1):
+                st.write(f"{i}. {q}")
+    else:
+        st.info("No sections available to review. Process documents to generate section summaries.")
 
 
 def render_comparison_page():

@@ -63,6 +63,22 @@ def build_chat_prompt(query: str, retrieved_docs: List[Dict[str, str]]) -> str:
     return prompt
 
 
+def build_section_question_prompt(section_name: str, old_context: str, new_context: str, num_questions: int = 5) -> str:
+    """Build a prompt for generating section-specific review questions."""
+    old_text = old_context.strip() or "No old section content available."
+    new_text = new_context.strip() or "No new section content available."
+    prompt = (
+        f"You are a policy review assistant. Generate {num_questions} concise, actionable questions for reviewers about the changes in the '{section_name}' section. "
+        "Focus on compliance, stakeholder impact, implementation steps, and risks. Return the questions as a numbered list.\n\n"
+        "Old section content:\n"
+        f"{old_text}\n\n"
+        "New section content:\n"
+        f"{new_text}\n\n"
+        "Questions:"
+    )
+    return prompt
+
+
 def query_llm(prompt: str, api_key: str = None, provider: str = "groq", model_name: str = None, endpoint: Optional[str] = None) -> str:
     # Allow explicit api_key or fallback to environment variables for compatibility
     key = api_key or os.getenv("GROQ_API_KEY") or os.getenv("LLM_API_KEY")
