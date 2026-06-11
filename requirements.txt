@@ -1,0 +1,15 @@
+streamlit
+sentence-transformers
+faiss-cpu
+pymupdf
+python-docx
+pandas
+numpy
+plotly
+reportlab
+scikit-learn
+groq
+openpyxl
+python-dotenv
+torch
+torchvision
